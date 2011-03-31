@@ -34,56 +34,87 @@ VERSION = "%prog v" + __version__
 
 AGENT = "%s/%s" % (__name__, __version__)
 
+class Link (object):
+
+    def __init__(self, src, dst, link_type):
+        self.src = src
+        self.dst = dst
+        self.link_type = link_type
+        
+    def __str__(self):
+        return self.src + " -> " + self.dst
+
 class Crawler(object):
 
-    def __init__(self, root, depth, confine=None, locked=True):
+    def __init__(self, root, depth_limit, confine=None, locked=True):
         self.root = root
-        self.depth = depth
+        self.depth_limit = depth_limit
         self.locked = locked
         self.confine_prefix=confine
         self.host = urlparse.urlparse(root)[1]
-        self.urls = []
+        self.urls_seen = []
+        self.links_seen = []
         self.links = 0
-        self.followed = 0
+        self.num_followed = 0
 
-    def prefix_ok(self, url):
+        self.visited_links=[]
+
+        self.url_filters=[self._prefix_ok,
+                          self._not_visited,
+                          self._same_host]
+
+    def _prefix_ok(self, url):
+        """Pass if the URL has the correct prefix, or none is specified"""
         return (self.confine_prefix is None  or
                 url.startswith(self.confine_prefix))
-
+    
+    def _not_visited(self, url):
+        """Pass if the URL has not already been visited"""
+        return (url not in self.visited_links)
+    
+    def _same_host(self, url):
+        """Pass if the URL is on the same host as the root URL"""
+        try:
+            host = urlparse.urlparse(url)[1]
+            return re.match(".*%s" % self.host, host) 
+        except Exception, e:
+            print "ERROR: Can't process url '%s' (%s)" % (url, e)
+            print format_exc()
+            return False
+            
 
     def crawl(self):
-        page = Fetcher(self.root)
-        page.fetch()
+        
         q = Queue()
-        for url in page.urls:
-            q.put(url)
-        followed = [self.root]
+        q.put((self.root, 0))
 
-        n = 0
-
-        while True:
-            try:
-                url = q.get()
-            except QueueEmpty:
-                break
-
-            n += 1
+        while not q.empty():
+            url, depth = q.get()
             
-            if url not in followed:
+            #Non-URL-specific filter: Discard anything over depth limit
+            if depth > self.depth_limit:
+                continue
+            
+            #Apply URL-based filters
+            do_not_follow = [f for f in self.url_filters if not f(url)]
+            
+            #Special-case depth 0 (starting URL)
+            if depth == 0 and [] != do_not_follow:
+                print >> sys.stderr, "Whoops! Starting URL %s rejected by the following filters:", do_not_follow
+
+            #If no filters failed (that is, all passed), process URL
+            if [] == do_not_follow:
                 try:
-                    host = urlparse.urlparse(url)[1]
-                    if self.locked and re.match(".*%s" % self.host, host):
-                        followed.append(url)
-                        self.followed += 1
-                        page = Fetcher(url)
-                        page.fetch()
-                        for i, url in enumerate(page):
-                            if url not in self.urls:
-                                self.links += 1
-                                q.put(url)
-                                self.urls.append(url)
-                        if n > self.depth and self.depth > 0:
-                            break
+                    self.visited_links.append(url)
+                    self.num_followed += 1
+                    page = Fetcher(url)
+                    page.fetch()
+                    for link_url in page.out_links():
+                        if link_url not in self.urls_seen:
+                            self.links += 1
+                            q.put((link_url, depth+1))
+                            self.urls_seen.append(link_url)
+                            self.links_seen.append(Link(url, link_url, "href"))
                 except Exception, e:
                     print "ERROR: Can't process url '%s' (%s)" % (url, e)
                     print format_exc()
@@ -96,20 +127,23 @@ class OpaqueDataException (Exception):
         
 
 class Fetcher(object):
-
-    HTML_RE=re.compile("Content-Type: text/html")
+    
+    """The name Fetcher is a slight misnomer: This class retrieves and interprets web pages."""
 
     def __init__(self, url):
         self.url = url
-        self.urls = []
+        self.out_urls = []
 
     def __getitem__(self, x):
-        return self.urls[x]
+        return self.out_urls[x]
+
+    def out_links(self):
+        return self.out_urls
 
     def _addHeaders(self, request):
         request.add_header("User-Agent", AGENT)
 
-    def open(self):
+    def _open(self):
         url = self.url
         try:
             request = urllib2.Request(url)
@@ -119,7 +153,7 @@ class Fetcher(object):
         return (request, handle)
 
     def fetch(self):
-        request, handle = self.open()
+        request, handle = self._open()
         self._addHeaders(request)
         if handle:
             try:
@@ -150,7 +184,7 @@ class Fetcher(object):
                 if href is not None:
                     url = urlparse.urljoin(self.url, escape(href))
                     if url not in self:
-                        self.urls.append(url)
+                        self.out_urls.append(url)
 
 def getLinks(url):
     page = Fetcher(url)
@@ -173,21 +207,32 @@ def parse_options():
 
     parser.add_option("-l", "--links",
             action="store_true", default=False, dest="links",
-            help="Get links for specified url only")
+            help="Get links for specified url only")    
 
     parser.add_option("-d", "--depth",
-            action="store", type="int", default=30, dest="depth",
+            action="store", type="int", default=30, dest="depth_limit",
             help="Maximum depth to traverse")
 
     parser.add_option("-c", "--confine",
             action="store", type="string", dest="confine",
             help="Confine crawl to specified prefix")
 
+    parser.add_option("-L", "--show-links", action="store_true", default=False,
+                      dest="out_links", help="Output links found")
+
+    parser.add_option("-u", "--show-urls", action="store_true", default=False,
+                      dest="out_urls", help="Output URLs found")
+
+
     opts, args = parser.parse_args()
 
     if len(args) < 1:
-        parser.print_help()
+        parser.print_help(sys.stderr)
         raise SystemExit, 1
+
+    if opts.out_links and opts.out_urls:
+        parser.print_help(sys.stderr)
+        parser.error("options -L and -u are mutually exclusive")
 
     return opts, args
 
@@ -200,22 +245,27 @@ def main():
         getLinks(url)
         raise SystemExit, 0
 
-    depth = opts.depth
+    depth_limit = opts.depth_limit
     confine_prefix=opts.confine
 
     sTime = time.time()
 
-    print "Crawling %s (Max Depth: %d)" % (url, depth)
-    crawler = Crawler(url, depth, confine_prefix)
+    print >> sys.stderr,  "Crawling %s (Max Depth: %d)" % (url, depth_limit)
+    crawler = Crawler(url, depth_limit, confine_prefix)
     crawler.crawl()
-    print "\n".join(crawler.urls)
+
+    if opts.out_urls:
+        print "\n".join(crawler.urls_seen)
+
+    if opts.out_links:
+        print "\n".join([str(l) for l in crawler.links_seen])
 
     eTime = time.time()
     tTime = eTime - sTime
 
-    print "Found:    %d" % crawler.links
-    print "Followed: %d" % crawler.followed
-    print "Stats:    (%d/s after %0.2fs)" % (
+    print >> sys.stderr, "Found:    %d" % crawler.links
+    print >> sys.stderr, "Followed: %d" % crawler.num_followed
+    print >> sys.stderr, "Stats:    (%d/s after %0.2fs)" % (
             int(math.ceil(float(crawler.links) / tTime)), tTime)
 
 if __name__ == "__main__":
