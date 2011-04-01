@@ -17,6 +17,7 @@ import math
 import urllib2
 import urlparse
 import optparse
+import hashlib
 from cgi import escape
 from traceback import format_exc
 from Queue import Queue, Empty as QueueEmpty
@@ -40,33 +41,67 @@ class Link (object):
         self.src = src
         self.dst = dst
         self.link_type = link_type
-        
+
+    def __hash__(self):
+        return hash((self.src, self.dst, self.link_type))
+
+    def __eq__(self, other):
+        return (self.src == other.src and
+                self.dst == other.dst and
+                self.link_type == other.link_type)
+    
     def __str__(self):
         return self.src + " -> " + self.dst
 
 class Crawler(object):
 
-    def __init__(self, root, depth_limit, confine=None, locked=True):
+    def __init__(self, root, depth_limit, confine=None, exclude=[], locked=True, filter_seen=True):
         self.root = root
         self.depth_limit = depth_limit
         self.locked = locked
         self.confine_prefix=confine
         self.host = urlparse.urlparse(root)[1]
         self.urls_seen = []
-        self.links_seen = []
+        self.urls_remembered = []
+        self.links_remembered = []
         self.links = 0
         self.num_followed = 0
+        self.exclude_prefixes=exclude;
 
         self.visited_links=[]
 
-        self.url_filters=[self._prefix_ok,
-                          self._not_visited,
-                          self._same_host]
+        self.pre_visit_filters=[self._prefix_ok,
+                                self._exclude_ok,
+                                self._not_visited,
+                                self._same_host]
+
+        if filter_seen:
+            self.post_visit_filters=[self._prefix_ok,
+                                     self._same_host]
+        else:
+            self.post_visit_filters=[]
+
+    def _pre_visit_url_condense(self, url):
+        
+        """Reduce URL in a flexible way.
+        Discards queries and fragments
+        """
+
+        base, frag = urlparse.urldefrag(url)
+        #u = urlparse.urlsplit(url)
+        #newurl = urlparse.urlunsplit((u.scheme, u.netloc, u.path, "", ""))
+        return base
 
     def _prefix_ok(self, url):
         """Pass if the URL has the correct prefix, or none is specified"""
         return (self.confine_prefix is None  or
                 url.startswith(self.confine_prefix))
+
+    def _exclude_ok(self, url):
+        """Pass if the URL does not match any exclude patterns"""
+        prefixes_ok = [ not url.startswith(p) for p in self.exclude_prefixes]
+        print >> sys.stderr, url, prefixes_ok
+        return all(prefixes_ok)
     
     def _not_visited(self, url):
         """Pass if the URL has not already been visited"""
@@ -78,8 +113,7 @@ class Crawler(object):
             host = urlparse.urlparse(url)[1]
             return re.match(".*%s" % self.host, host) 
         except Exception, e:
-            print "ERROR: Can't process url '%s' (%s)" % (url, e)
-            print format_exc()
+            print >> sys.stderr, "ERROR: Can't process url '%s' (%s)" % (url, e)
             return False
             
 
@@ -96,7 +130,7 @@ class Crawler(object):
                 continue
             
             #Apply URL-based filters
-            do_not_follow = [f for f in self.url_filters if not f(url)]
+            do_not_follow = [f for f in self.pre_visit_filters if not f(url)]
             
             #Special-case depth 0 (starting URL)
             if depth == 0 and [] != do_not_follow:
@@ -109,15 +143,21 @@ class Crawler(object):
                     self.num_followed += 1
                     page = Fetcher(url)
                     page.fetch()
-                    for link_url in page.out_links():
+                    for link_url in [self._pre_visit_url_condense(l) for l in page.out_links()]:
                         if link_url not in self.urls_seen:
-                            self.links += 1
                             q.put((link_url, depth+1))
                             self.urls_seen.append(link_url)
-                            self.links_seen.append(Link(url, link_url, "href"))
+                            
+                        do_not_remember = [f for f in self.post_visit_filters if not f(link_url)]
+                        if [] == do_not_remember:
+                                self.links += 1
+                                self.urls_remembered.append(link_url)
+                                link = Link(url, link_url, "href")
+                                if link not in self.links_remembered:
+                                    self.links_remembered.append(link)
                 except Exception, e:
-                    print "ERROR: Can't process url '%s' (%s)" % (url, e)
-                    print format_exc()
+                    print >>sys.stderr, "ERROR: Can't process url '%s' (%s)" % (url, e)
+                    #print format_exc()
 
 class OpaqueDataException (Exception):
     def __init__(self, message, mimetype, url):
@@ -217,11 +257,18 @@ def parse_options():
             action="store", type="string", dest="confine",
             help="Confine crawl to specified prefix")
 
+    parser.add_option("-x", "--exclude", action="append", type="string",
+                      dest="exclude", default=[], help="Exclude URLs by prefix")
+    
     parser.add_option("-L", "--show-links", action="store_true", default=False,
                       dest="out_links", help="Output links found")
 
     parser.add_option("-u", "--show-urls", action="store_true", default=False,
                       dest="out_urls", help="Output URLs found")
+
+    parser.add_option("-D", "--dot", action="store_true", default=False,
+                      dest="out_dot", help="Output Graphviz dot file")
+    
 
 
     opts, args = parser.parse_args()
@@ -236,7 +283,15 @@ def parse_options():
 
     return opts, args
 
-def main():
+def dot_safe_alias(url):
+    
+    """ Make some unique string which DOT can live with"""
+
+    m = hashlib.md5()
+    m.update(url)
+    return "N"+m.hexdigest()
+
+def main():    
     opts, args = parse_options()
 
     url = args[0]
@@ -247,18 +302,33 @@ def main():
 
     depth_limit = opts.depth_limit
     confine_prefix=opts.confine
+    exclude=opts.exclude
 
     sTime = time.time()
 
     print >> sys.stderr,  "Crawling %s (Max Depth: %d)" % (url, depth_limit)
-    crawler = Crawler(url, depth_limit, confine_prefix)
+    crawler = Crawler(url, depth_limit, confine_prefix, exclude)
     crawler.crawl()
 
     if opts.out_urls:
         print "\n".join(crawler.urls_seen)
 
     if opts.out_links:
-        print "\n".join([str(l) for l in crawler.links_seen])
+        print "\n".join([str(l) for l in crawler.links_remembered])
+        
+    if opts.out_dot:
+        node_alias = {}
+        print "digraph Crawl {"
+        print "\t edge [K=0.2, len=0.1];"
+        for l in crawler.links_remembered:            
+            if l.src not in node_alias:
+                node_alias[l.src] = dot_safe_alias(l.src)
+                print "\t%s [label=\"%s\"];" % (node_alias[l.src], l.src)
+            if l.dst not in node_alias:
+                node_alias[l.dst] = dot_safe_alias(l.dst)
+                print "\t%s [label=\"%s\"];" % (node_alias[l.dst], l.dst)
+            print "\t" + node_alias[l.src] + " -> " + node_alias[l.dst] + ";"
+        print  "}"
 
     eTime = time.time()
     tTime = eTime - sTime
