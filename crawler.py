@@ -57,41 +57,55 @@ class Crawler(object):
 
     def __init__(self, root, depth_limit, confine=None, exclude=[], locked=True, filter_seen=True):
         self.root = root
-        self.depth_limit = depth_limit
-        self.locked = locked
-        self.confine_prefix=confine
         self.host = urlparse.urlparse(root)[1]
-        self.urls_seen = []
-        self.urls_remembered = []
-        self.links_remembered = []
-        self.links = 0
-        self.num_followed = 0
-        self.exclude_prefixes=exclude;
 
-        self.visited_links=[]
+        ## Data for filters:
+        self.depth_limit = depth_limit # Max depth (number of hops from root)
+        self.locked = locked           # Limit search to a single host?
+        self.confine_prefix=confine    # Limit search to this prefix
+        self.exclude_prefixes=exclude; # URL prefixes NOT to visit
+                
 
+        self.urls_seen = set()          # Used to avoid putting duplicates in queue
+        self.urls_remembered = set()    # For reporting to user
+        self.visited_links= set()       # Used to avoid re-processing a page
+        self.links_remembered = set()   # For reporting to user
+        
+        self.num_links = 0              # Links found (and not excluded by filters)
+        self.num_followed = 0           # Links followed.  
+
+        # Pre-visit filters:  Only visit a URL if it passes these tests
         self.pre_visit_filters=[self._prefix_ok,
                                 self._exclude_ok,
                                 self._not_visited,
                                 self._same_host]
 
+        # Out-url filters: When examining a visited page, only process
+        # links where the target matches these filters.        
         if filter_seen:
-            self.post_visit_filters=[self._prefix_ok,
+            self.out_url_filters=[self._prefix_ok,
                                      self._same_host]
         else:
-            self.post_visit_filters=[]
+            self.out_url_filters=[]
 
     def _pre_visit_url_condense(self, url):
         
-        """Reduce URL in a flexible way.
-        Discards queries and fragments
-        """
+        """ Reduce (condense) URLs into some canonical form before
+        visiting.  All occurrences of equivalent URLs are treated as
+        identical.
+
+        All this does is strip the \"fragment\" component from URLs,
+        so that http://foo.com/blah.html\#baz becomes
+        http://foo.com/blah.html """
 
         base, frag = urlparse.urldefrag(url)
-        #u = urlparse.urlsplit(url)
-        #newurl = urlparse.urlunsplit((u.scheme, u.netloc, u.path, "", ""))
         return base
 
+    ## URL Filtering functions.  These all use information from the
+    ## state of the Crawler to evaluate whether a given URL should be
+    ## used in some context.  Return value of True indicates that the
+    ## URL should be used.
+    
     def _prefix_ok(self, url):
         """Pass if the URL has the correct prefix, or none is specified"""
         return (self.confine_prefix is None  or
@@ -100,7 +114,6 @@ class Crawler(object):
     def _exclude_ok(self, url):
         """Pass if the URL does not match any exclude patterns"""
         prefixes_ok = [ not url.startswith(p) for p in self.exclude_prefixes]
-        print >> sys.stderr, url, prefixes_ok
         return all(prefixes_ok)
     
     def _not_visited(self, url):
@@ -118,19 +131,34 @@ class Crawler(object):
             
 
     def crawl(self):
+
+        """ Main function in the crawling process.  Core algorithm is:
+
+        q <- starting page
+        while q not empty:
+           url <- q.get()
+           if url is new and suitable:
+              page <- fetch(url)   
+              q.put(urls found in page)
+           else:
+              nothing
+
+        new and suitable means that we don't re-visit URLs we've seen
+        already fetched, and user-supplied criteria like maximum
+        search depth are checked. """
         
         q = Queue()
         q.put((self.root, 0))
 
         while not q.empty():
-            url, depth = q.get()
+            this_url, depth = q.get()
             
             #Non-URL-specific filter: Discard anything over depth limit
             if depth > self.depth_limit:
                 continue
             
-            #Apply URL-based filters
-            do_not_follow = [f for f in self.pre_visit_filters if not f(url)]
+            #Apply URL-based filters.
+            do_not_follow = [f for f in self.pre_visit_filters if not f(this_url)]
             
             #Special-case depth 0 (starting URL)
             if depth == 0 and [] != do_not_follow:
@@ -139,24 +167,24 @@ class Crawler(object):
             #If no filters failed (that is, all passed), process URL
             if [] == do_not_follow:
                 try:
-                    self.visited_links.append(url)
+                    self.visited_links.add(this_url)
                     self.num_followed += 1
-                    page = Fetcher(url)
+                    page = Fetcher(this_url)
                     page.fetch()
                     for link_url in [self._pre_visit_url_condense(l) for l in page.out_links()]:
                         if link_url not in self.urls_seen:
                             q.put((link_url, depth+1))
-                            self.urls_seen.append(link_url)
+                            self.urls_seen.add(link_url)
                             
-                        do_not_remember = [f for f in self.post_visit_filters if not f(link_url)]
+                        do_not_remember = [f for f in self.out_url_filters if not f(link_url)]
                         if [] == do_not_remember:
-                                self.links += 1
-                                self.urls_remembered.append(link_url)
-                                link = Link(url, link_url, "href")
+                                self.num_links += 1
+                                self.urls_remembered.add(link_url)
+                                link = Link(this_url, link_url, "href")
                                 if link not in self.links_remembered:
-                                    self.links_remembered.append(link)
+                                    self.links_remembered.add(link)
                 except Exception, e:
-                    print >>sys.stderr, "ERROR: Can't process url '%s' (%s)" % (url, e)
+                    print >>sys.stderr, "ERROR: Can't process url '%s' (%s)" % (this_url, e)
                     #print format_exc()
 
 class OpaqueDataException (Exception):
@@ -283,13 +311,46 @@ def parse_options():
 
     return opts, args
 
-def dot_safe_alias(url):
-    
-    """ Make some unique string which DOT can live with"""
+class DotWriter:
 
-    m = hashlib.md5()
-    m.update(url)
-    return "N"+m.hexdigest()
+    """ Formats a collection of Link objects as a Graphviz (Dot)
+    graph.  Mostly, this means creating a node for each URL with a
+    name which Graphviz will accept, and declaring links between those
+    nodes."""
+
+    def __init__ (self):
+        self.node_alias = {}
+
+    def _safe_alias(self, url, silent=False):
+
+        """Translate URLs into unique strings guaranteed to be safe as
+        node names in the Graphviz language.  Currently, that's based
+        on the md5 digest, in hexadecimal."""
+
+        if url in self.node_alias:
+            return self.node_alias[url]
+        else:
+            m = hashlib.md5()
+            m.update(url)
+            name = "N"+m.hexdigest()
+            self.node_alias[url]=name
+            if not silent:
+                print "\t%s [label=\"%s\"];" % (name, url)                
+            return name
+
+
+    def asDot(self, links):
+
+        """ Render a collection of Link objects as a Dot graph"""
+        
+        print "digraph Crawl {"
+        print "\t edge [K=0.2, len=0.1];"
+        for l in links:            
+            print "\t" + self._safe_alias(l.src) + " -> " + self._safe_alias(l.dst) + ";"
+        print  "}"
+
+        
+    
 
 def main():    
     opts, args = parse_options()
@@ -317,26 +378,16 @@ def main():
         print "\n".join([str(l) for l in crawler.links_remembered])
         
     if opts.out_dot:
-        node_alias = {}
-        print "digraph Crawl {"
-        print "\t edge [K=0.2, len=0.1];"
-        for l in crawler.links_remembered:            
-            if l.src not in node_alias:
-                node_alias[l.src] = dot_safe_alias(l.src)
-                print "\t%s [label=\"%s\"];" % (node_alias[l.src], l.src)
-            if l.dst not in node_alias:
-                node_alias[l.dst] = dot_safe_alias(l.dst)
-                print "\t%s [label=\"%s\"];" % (node_alias[l.dst], l.dst)
-            print "\t" + node_alias[l.src] + " -> " + node_alias[l.dst] + ";"
-        print  "}"
+        d = DotWriter()
+        d.asDot(crawler.links_remembered)
 
     eTime = time.time()
     tTime = eTime - sTime
 
-    print >> sys.stderr, "Found:    %d" % crawler.links
+    print >> sys.stderr, "Found:    %d" % crawler.num_links
     print >> sys.stderr, "Followed: %d" % crawler.num_followed
     print >> sys.stderr, "Stats:    (%d/s after %0.2fs)" % (
-            int(math.ceil(float(crawler.links) / tTime)), tTime)
+            int(math.ceil(float(crawler.num_links) / tTime)), tTime)
 
 if __name__ == "__main__":
     main()
