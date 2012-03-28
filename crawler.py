@@ -22,7 +22,7 @@ from cgi import escape
 from traceback import format_exc
 from Queue import Queue, Empty as QueueEmpty
 
-from BeautifulSoup import BeautifulSoup
+from bs4 import BeautifulSoup
 
 __version__ = "0.2"
 __copyright__ = "CopyRight (C) 2008-2011 by James Mills"
