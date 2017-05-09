@@ -14,7 +14,9 @@ import re
 import sys
 import time
 import math
-from urllib import *
+import urllib
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 import optparse
 import hashlib
@@ -214,8 +216,8 @@ class Fetcher(object):
     def _open(self):
         url = self.url
         try:
-            request = urllib.request.urlopen(url).read()
-            handle = urllib.build_opener()
+            request = urllib.request.Request(url)
+            handle = urllib.request.build_opener()
         except IOError:
             return None
         return (request, handle)
@@ -226,22 +228,21 @@ class Fetcher(object):
         if handle:
             try:
                 data=handle.open(request)
-                mime_type=data.info().gettype()
+                mime_type=data.info().get_content_type()
                 url=data.geturl();
                 if mime_type != "text/html":
                     raise OpaqueDataException("Not interested in files of type %s" % mime_type,
                                               mime_type, url)
-                content = unicode(data.read(), "utf-8",
-                        errors="replace")
-                soup = BeautifulSoup(content)
+                content = data.read().decode("utf-8", errors="replace")
+                soup = BeautifulSoup(content, "html.parser")
                 tags = soup('a')
-            except urllib.HTTPError as error:
+            except urllib.error.HTTPError as error:
                 if error.code == 404:
                     print(sys.stderr, "ERROR: %s -> %s" % (error, error.url))
                 else:
                     print(sys.stderr, "ERROR: %s" % error)
                 tags = []
-            except urllib.URLError as error:
+            except urllib.error.URLError as error:
                 print(sys.stderr, "ERROR: %s" % error)
                 tags = []
             except OpaqueDataException as error:
