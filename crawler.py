@@ -1,23 +1,13 @@
 #!/usr/bin/env python
 
-"""Web Crawler/Spider
-
-This module implements a web crawler. This is very _basic_ only
-and needs to be extended to do anything usefull with the
-traversed pages.
-
-From: http://code.activestate.com/recipes/576551-simple-web-crawler/
-
-"""
+""" This is a modified version of James Mills' original recipe. """
 
 import re
 import sys
 import time
 import math
 import urllib
-import urllib.error
-import urllib.request
-from urllib.parse import urlparse
+import urllib.parse
 import optparse
 import hashlib
 from cgi import escape
@@ -25,17 +15,6 @@ from traceback import format_exc
 from queue import Queue, Empty as QueueEmpty
 
 from bs4 import BeautifulSoup
-
-__version__ = "0.2"
-__copyright__ = "CopyRight (C) 2008-2011 by James Mills"
-__license__ = "MIT"
-__author__ = "James Mills"
-__author_email__ = "James Mills, James dot Mills st dotred dot com dot au"
-
-USAGE = "%prog [options] <url>"
-VERSION = "%prog v" + __version__
-
-AGENT = "%s/%s" % (__name__, __version__)
 
 class Link (object):
 
@@ -59,7 +38,7 @@ class Crawler(object):
 
     def __init__(self, root, depth_limit, confine=None, exclude=[], locked=True, filter_seen=True):
         self.root = root
-        self.host = urlparse(root)[1]
+        self.host = urlparse.urlparse(root)[1]
 
         ## Data for filters:
         self.depth_limit = depth_limit # Max depth (number of hops from root)
@@ -100,7 +79,7 @@ class Crawler(object):
         so that http://foo.com/blah.html\#baz becomes
         http://foo.com/blah.html """
 
-        base, frag = urllib.parse.urldefrag(url)
+        base, frag = urlparse.urldefrag(url)
         return base
 
     ## URL Filtering functions.  These all use information from the
@@ -125,10 +104,10 @@ class Crawler(object):
     def _same_host(self, url):
         """Pass if the URL is on the same host as the root URL"""
         try:
-            host = urlparse(url)[1]
+            host = urlparse.urlparse(url)[1]
             return re.match(".*%s" % self.host, host) 
         except Exception as e:
-            print(sys.stderr, "ERROR: Can't process url '%s' (%s)" % (url, e))
+            print >> sys.stderr, "ERROR: Can't process url '%s' (%s)" % (url, e)
             return False
             
 
@@ -164,7 +143,7 @@ class Crawler(object):
             
             #Special-case depth 0 (starting URL)
             if depth == 0 and [] != do_not_follow:
-                print(sys.stderr, "Whoops! Starting URL %s rejected by the following filters:", do_not_follow)
+                print >> sys.stderr, "Whoops! Starting URL %s rejected by the following filters:", do_not_follow
 
             #If no filters failed (that is, all passed), process URL
             if [] == do_not_follow:
@@ -186,7 +165,7 @@ class Crawler(object):
                                 if link not in self.links_remembered:
                                     self.links_remembered.add(link)
                 except Exception as e:
-                    print(sys.stderr, "ERROR: Can't process url '%s' (%s)" % (this_url, e))
+                    print >>sys.stderr, "ERROR: Can't process url '%s' (%s)" % (this_url, e)
                     #print format_exc()
 
 class OpaqueDataException (Exception):
@@ -210,56 +189,63 @@ class Fetcher(object):
     def out_links(self):
         return self.out_urls
 
-    def _addHeaders(self, request):
-        request.add_header("User-Agent", AGENT)
+    #def _addHeaders(self, request):
+    #    request.add_header("User-Agent", AGENT)
 
     def _open(self):
         url = self.url
         try:
-            request = urllib.request.Request(url)
-            handle = urllib.request.build_opener()
+            request = urllib2.Request(url)
+            handle = urllib2.build_opener()
         except IOError:
             return None
         return (request, handle)
 
     def fetch(self):
         request, handle = self._open()
-        self._addHeaders(request)
+        #self._addHeaders(request)
         if handle:
             try:
                 data=handle.open(request)
-                mime_type=data.info().get_content_type()
+                mime_type=data.info().gettype()
                 url=data.geturl();
                 if mime_type != "text/html":
                     raise OpaqueDataException("Not interested in files of type %s" % mime_type,
                                               mime_type, url)
-                content = data.read().decode("utf-8", errors="replace")
-                soup = BeautifulSoup(content, "html.parser")
+                content = unicode(data.read(), "utf-8",
+                        errors="replace")
+                soup = BeautifulSoup(content)
                 tags = soup('a')
-            except urllib.error.HTTPError as error:
+            except urllib2.HTTPError as error:
                 if error.code == 404:
-                    print(sys.stderr, "ERROR: %s -> %s" % (error, error.url))
+                    print >> sys.stderr, "ERROR: %s -> %s" % (error, error.url)
                 else:
-                    print(sys.stderr, "ERROR: %s" % error)
+                    print >> sys.stderr, "ERROR: %s" % error
                 tags = []
-            except urllib.error.URLError as error:
-                print(sys.stderr, "ERROR: %s" % error)
+            except urllib2.URLError as error:
+                print >> sys.stderr, "ERROR: %s" % error
                 tags = []
             except OpaqueDataException as error:
-                print(sys.stderr, "Skipping %s, has type %s" % (error.url, error.mimetype))
+                print >>sys.stderr, "Skipping %s, has type %s" % (error.url, error.mimetype)
                 tags = []
             for tag in tags:
                 href = tag.get("href")
                 if href is not None:
-                    url = urllib.parse.urljoin(self.url, escape(href))
+                    url = urlparse.urljoin(self.url, escape(href))
                     if url not in self:
                         self.out_urls.append(url)
 
 def getLinks(url):
     page = Fetcher(url)
     page.fetch()
+    """for i, url in enumerate(page):
+        print "%d. %s" % (i, url) """
+    j = 1
     for i, url in enumerate(page):
-        print("%d. %s" % (i, url))
+        if url.find("http")>=0:
+                some_var = """%d. %s"""%(j,url)
+                print(some_var)
+                j = j + 1
 
 def parse_options():
     """parse_options() -> opts, args
@@ -268,7 +254,7 @@ def parse_options():
     the parsed options and arguments.
     """
 
-    parser = optparse.OptionParser(usage=USAGE, version=VERSION)
+    parser = optparse.OptionParser()
 
     parser.add_option("-q", "--quiet",
             action="store_true", default=False, dest="quiet",
@@ -336,7 +322,7 @@ class DotWriter:
             name = "N"+m.hexdigest()
             self.node_alias[url]=name
             if not silent:
-                print("\t%s [label=\"%s\"];" % (name, url))
+                print("\t%s [label=\"%s\"];" % (name, url))                
             return name
 
 
@@ -368,7 +354,7 @@ def main():
 
     sTime = time.time()
 
-    print(sys.stderr,  "Crawling %s (Max Depth: %d)" % (url, depth_limit))
+    print >> sys.stderr,  "Crawling %s (Max Depth: %d)" % (url, depth_limit)
     crawler = Crawler(url, depth_limit, confine_prefix, exclude)
     crawler.crawl()
 
@@ -385,9 +371,10 @@ def main():
     eTime = time.time()
     tTime = eTime - sTime
 
-    print(sys.stderr, "Found:    %d" % crawler.num_links)
-    print(sys.stderr, "Followed: %d" % crawler.num_followed)
-    print(sys.stderr, "Stats:    (%d/s after %0.2fs)" % (int(math.ceil(float(crawler.num_links) / tTime)), tTime))
+    print >> sys.stderr, "Found:    %d" % crawler.num_links
+    print >> sys.stderr, "Followed: %d" % crawler.num_followed
+    print >> sys.stderr, "Stats:    (%d/s after %0.2fs)" % (
+            int(math.ceil(float(crawler.num_links) / tTime)), tTime)
 
 if __name__ == "__main__":
     main()
