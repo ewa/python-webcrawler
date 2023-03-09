@@ -12,7 +12,9 @@
             "pythonPath": "${workspaceFolder}/bin/python",
             "console": "integratedTerminal",
             "justMyCode": true,
-            "args": []
+            "args": [
+                "-h" // put additional commands here to debug
+            ]
         }
     ]
 }
