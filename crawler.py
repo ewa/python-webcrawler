@@ -9,6 +9,7 @@ import math
 import urllib.request
 import urllib.error
 from urllib.parse import urljoin
+from urllib.parse import urlparse
 import optparse
 import hashlib
 from html import escape
@@ -41,7 +42,7 @@ class Crawler(object):
 
     def __init__(self, root, depth_limit, confine=None, exclude=[], locked=True, filter_seen=True):
         self.root = root
-        self.host = urlparse.urlparse(root)[1]
+        self.host = urlparse(root)[1]
 
         # Data for filters:
         self.depth_limit = depth_limit  # Max depth (number of hops from root)
@@ -106,11 +107,10 @@ class Crawler(object):
     def _same_host(self, url):
         """Pass if the URL is on the same host as the root URL"""
         try:
-            host = urlparse.urlparse(url)[1]
+            host = urlparse(url).netloc
             return re.match(".*%s" % self.host, host)
         except Exception as e:
-            print >> sys.stderr, "ERROR: Can't process url '%s' (%s)" % (
-                url, e)
+            print("ERROR: Can't process url '%s' (%s)" % (url, e), file=sys.stderr)
             return False
 
     def crawl(self):
