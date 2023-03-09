@@ -6,8 +6,9 @@ import re
 import sys
 import time
 import math
-import urllib
-import urllib.parse
+import urllib.request
+import urllib.error
+from urllib.parse import urljoin
 import optparse
 import hashlib
 from html import escape
