@@ -174,9 +174,7 @@ class OpaqueDataException (Exception):
         self.mimetype=mimetype
         self.url=url
         
-
-class Fetcher(object):
-    
+class Fetcher:
     """The name Fetcher is a slight misnomer: This class retrieves and interprets web pages."""
 
     def __init__(self, url):
@@ -189,49 +187,44 @@ class Fetcher(object):
     def out_links(self):
         return self.out_urls
 
-    #def _addHeaders(self, request):
-    #    request.add_header("User-Agent", AGENT)
-
     def _open(self):
         url = self.url
         try:
-            request = urllib2.Request(url)
-            handle = urllib2.build_opener()
+            request = urllib.request.Request(url)
+            handle = urllib.request.build_opener()
         except IOError:
             return None
         return (request, handle)
 
     def fetch(self):
         request, handle = self._open()
-        #self._addHeaders(request)
+        # self._addHeaders(request)
         if handle:
             try:
-                data=handle.open(request)
-                mime_type=data.info().gettype()
-                url=data.geturl();
+                data = handle.open(request)
+                mime_type = data.info().get_content_type()
+                url = data.geturl()
                 if mime_type != "text/html":
-                    raise OpaqueDataException("Not interested in files of type %s" % mime_type,
-                                              mime_type, url)
-                content = unicode(data.read(), "utf-8",
-                        errors="replace")
-                soup = BeautifulSoup(content)
+                    raise Exception("Not interested in files of type %s" % mime_type)
+                content = data.read().decode('utf-8', errors='replace')
+                soup = BeautifulSoup(content, 'html.parser')
                 tags = soup('a')
-            except urllib2.HTTPError as error:
+            except urllib.error.HTTPError as error:
                 if error.code == 404:
-                    print >> sys.stderr, "ERROR: %s -> %s" % (error, error.url)
+                    print("ERROR: %s -> %s" % (error, error.url), file=sys.stderr)
                 else:
-                    print >> sys.stderr, "ERROR: %s" % error
+                    print("ERROR: %s" % error, file=sys.stderr)
                 tags = []
-            except urllib2.URLError as error:
-                print >> sys.stderr, "ERROR: %s" % error
+            except urllib.error.URLError as error:
+                print("ERROR: %s" % error, file=sys.stderr)
                 tags = []
-            except OpaqueDataException as error:
-                print >>sys.stderr, "Skipping %s, has type %s" % (error.url, error.mimetype)
+            except Exception as error:
+                print("Skipping %s, has type %s" % (url, mime_type), file=sys.stderr)
                 tags = []
             for tag in tags:
                 href = tag.get("href")
                 if href is not None:
-                    url = urlparse.urljoin(self.url, escape(href))
+                    url = urljoin(self.url, href)
                     if url not in self:
                         self.out_urls.append(url)
 
